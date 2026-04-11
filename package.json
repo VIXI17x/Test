@@ -1,0 +1,17 @@
+{
+  "name": "apple-notes-exporter",
+  "version": "1.0.0",
+  "description": "Export all Apple Notes as PDF and PNG files via iCloud.com automation using Playwright",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "export": "node index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.44.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
