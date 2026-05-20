@@ -41,9 +41,13 @@ Applicando T² = 4π²/GM · a³ alla Terra (a = 1 UA, T = 1 anno, M = 1 M☉):
 
 """
 
+import argparse
+import sys
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from matplotlib.widgets import Slider, Button
 
 
 # Costante gravitazionale × massa del Sole nelle nostre unità.
@@ -142,7 +146,10 @@ class Orbita:
         a_curr = self.accelerazione(pos[0])
 
         T_sim = None
-        v_r_prev = 0.0          # al perielio iniziale dr/dt = 0
+        # Il pianeta parte da (r_p, 0) con v_y > 0: percorre il semipiano
+        # y > 0, attraversa l'asse x negativo (afelio), entra nel semipiano
+        # y < 0 e ritorna sull'asse x positivo (perielio) dopo un periodo T.
+        visto_semipiano_inferiore = False
         i_end = n_max - 1
 
         for i in range(1, n_max):
@@ -153,21 +160,20 @@ class Orbita:
             a_curr = a_new
             E[i]   = self.energia(pos[i], vel[i])
 
-            # --- rilevamento ritorno al perielio ---
-            # v_r = (r · v) / |r|  è la velocità radiale.
-            # Al perielio r è minimo ⇒ v_r = 0; subito dopo v_r > 0
-            # (il pianeta si allontana), all'afelio v_r di nuovo = 0,
-            # poi v_r < 0 fino al perielio successivo (cambio di segno).
-            r_mag = np.linalg.norm(pos[i])
-            v_r   = np.dot(pos[i], vel[i]) / r_mag
-            if T_sim is None and i > 20:
-                if v_r_prev < 0.0 and v_r >= 0.0:
-                    # interpolazione lineare per stimare meglio l'istante
-                    frac = -v_r_prev / (v_r - v_r_prev)
-                    T_sim = t[i-1] + frac * dt
-                    i_end = i
-                    break
-            v_r_prev = v_r
+            # --- rilevamento del periodo ---
+            # Catturiamo l'attraversamento dell'asse x positivo dal basso
+            # (y < 0 → y ≥ 0 con x > 0), dopo aver visitato il semipiano
+            # inferiore. Robustamente funziona anche per orbite quasi
+            # circolari (e ≈ 0), dove la velocità radiale è ~0 ovunque.
+            if pos[i, 1] < 0.0:
+                visto_semipiano_inferiore = True
+            elif (visto_semipiano_inferiore
+                  and pos[i-1, 1] < 0.0 and pos[i, 1] >= 0.0
+                  and pos[i, 0] > 0.0):
+                frac = -pos[i-1, 1] / (pos[i, 1] - pos[i-1, 1])
+                T_sim = t[i-1] + frac * dt
+                i_end = i
+                break
 
         # tronchiamo gli array al primo periodo completo
         self.pos   = pos[:i_end+1]
@@ -400,6 +406,196 @@ Conclusione fisica:
 
 
 # ---------------------------------------------------------------------------
+#  Modalità interattiva con slider
+# ---------------------------------------------------------------------------
+
+# Parametri delle orbite di riferimento (riusate da main e da "Confronta")
+PARAMETRI_RIFERIMENTO = [
+    (0.39, 0.21, "Mercurio"),
+    (0.72, 0.01, "Venere"),
+    (1.00, 0.02, "Terra"),
+    (1.52, 0.09, "Marte"),
+    (2.77, 0.25, "Cerere*"),
+    (5.20, 0.05, "Giove"),
+]
+
+
+def _integra_veloce(a, e, passi=2000):
+    """Integrazione "leggera" (~2000 passi/orbita) per uso interattivo.
+
+    Per la modalità con slider serve solo UN periodo completo e una
+    risoluzione sufficiente per il disegno: meno passi = aggiornamento
+    fluido al movimento dello slider.
+    """
+    orb = Orbita(a, e)
+    T_atteso = a ** 1.5
+    orb.integra(dt=T_atteso / passi, t_max=2.0 * T_atteso)
+    return orb
+
+
+def interattivo():
+    """Modalità interattiva: slider per a ed e, info in tempo reale.
+
+    Suggerimento didattico: partire da e = 0 (cerchio), poi alzare e
+    lentamente. L'ellisse si "schiaccia" ma T²/a³ resta ≈ 1: la terza
+    legge dipende SOLO dal semiasse, non dalla forma dell'ellisse.
+    """
+    fig = plt.figure(figsize=(13.5, 8.5))
+    fig.suptitle("Esplora le orbite — Terza legge di Keplero (T² ∝ a³)",
+                 fontsize=14, fontweight='bold')
+
+    # -- assi dell'orbita (sinistra) --
+    ax = fig.add_axes([0.06, 0.30, 0.55, 0.62])
+    ax.set_aspect('equal')
+    ax.set_facecolor('#05050f')
+    ax.set_xlabel('x [UA]'); ax.set_ylabel('y [UA]')
+    ax.grid(True, color='white', alpha=0.10)
+
+    # Sole al centro (fisso)
+    ax.plot(0, 0, marker='o', color='gold', markersize=22,
+            markeredgecolor='orange', zorder=5)
+
+    # Orbita corrente: linea + marker del pianeta al perielio
+    linea_orb, = ax.plot([], [], '-', color='#ff5252', linewidth=2.3,
+                          zorder=4)
+    pianeta,   = ax.plot([], [], 'o', color='#ff5252', markersize=11,
+                          markeredgecolor='white', markeredgewidth=1.0,
+                          zorder=6)
+
+    # Orbite di riferimento (preparate ora, mostrate al toggle "Confronta")
+    colori_ref = plt.cm.plasma(np.linspace(0.15, 0.9,
+                                           len(PARAMETRI_RIFERIMENTO)))
+    linee_ref = []
+    orbite_ref_cache = []
+    for (a_r, e_r, nome), c in zip(PARAMETRI_RIFERIMENTO, colori_ref):
+        orb_r = _integra_veloce(a_r, e_r, passi=2000)
+        orbite_ref_cache.append(orb_r)
+        linea, = ax.plot([], [], '--', color=c, linewidth=1.0, alpha=0.6,
+                          label=f"{nome} (a={a_r})")
+        linee_ref.append(linea)
+
+    # -- pannello informativo (destra) --
+    ax_info = fig.add_axes([0.64, 0.30, 0.34, 0.62])
+    ax_info.axis('off')
+    ax_info.add_patch(plt.Rectangle((0, 0), 1, 1, transform=ax_info.transAxes,
+                                     facecolor='#f4f4f8', edgecolor='#888',
+                                     linewidth=1))
+    info_text = ax_info.text(0.05, 0.96, '', transform=ax_info.transAxes,
+                              family='monospace', fontsize=11,
+                              verticalalignment='top')
+
+    # -- slider --
+    ax_slider_a = fig.add_axes([0.13, 0.17, 0.55, 0.03])
+    ax_slider_e = fig.add_axes([0.13, 0.12, 0.55, 0.03])
+    slider_a = Slider(ax_slider_a, 'a [UA]', 0.3, 5.0,
+                      valinit=1.0,    valstep=0.1,  color='#ff5252')
+    slider_e = Slider(ax_slider_e, 'e',      0.0, 0.9,
+                      valinit=0.0,    valstep=0.05, color='#1f77b4')
+
+    # -- pulsanti --
+    ax_btn_reset = fig.add_axes([0.75, 0.155, 0.10, 0.05])
+    ax_btn_cmp   = fig.add_axes([0.86, 0.155, 0.12, 0.05])
+    btn_reset = Button(ax_btn_reset, 'Reset')
+    btn_cmp   = Button(ax_btn_cmp,   'Confronta')
+
+    stato = {'mostra_ref': False}
+
+    def aggiorna(_val=None):
+        a = slider_a.val
+        e = slider_e.val
+        orb = _integra_veloce(a, e, passi=2000)
+        if orb.T_sim is None:
+            info_text.set_text("Periodo non rilevato (riduci e o aumenta a).")
+            fig.canvas.draw_idle()
+            return
+
+        # Aggiorna disegno
+        linea_orb.set_data(orb.pos[:, 0], orb.pos[:, 1])
+        pianeta.set_data([orb.pos[0, 0]], [orb.pos[0, 1]])
+
+        # Calcola grandezze fisiche
+        T          = orb.T_sim
+        rapporto   = T**2 / a**3
+        v_peri     = np.linalg.norm(orb.vel[0])
+        r_distanze = np.linalg.norm(orb.pos, axis=1)
+        idx_afelio = int(np.argmax(r_distanze))
+        v_afelio   = np.linalg.norm(orb.vel[idx_afelio])
+        E_spec     = orb.E[0]
+        E_teor     = -GM / (2.0 * a)  # energia teorica orbita ellittica
+        dE_perc    = (orb.E.max() - orb.E.min()) / abs(E_spec) * 100
+
+        info_text.set_text(
+            "  ORBITA CORRENTE\n"
+            "  ─────────────────────────\n\n"
+            f"  a   = {a:.3f} UA\n"
+            f"  e   = {e:.3f}\n\n"
+            f"  T          = {T:.4f} anni\n"
+            f"  T²/a³      = {rapporto:.5f}\n"
+            f"               (Keplero: → 1)\n\n"
+            f"  v(perielio)= {v_peri:.4f} UA/anno\n"
+            f"  v(afelio)  = {v_afelio:.4f} UA/anno\n"
+            f"  v_p / v_a  = {v_peri/v_afelio:.4f}\n"
+            f"               (atteso: (1+e)/(1-e)\n"
+            f"                = {(1+e)/(1-e):.4f})\n\n"
+            f"  E specifica= {E_spec:+.4f} UA²/a²\n"
+            f"  E teorica  = {E_teor:+.4f}\n"
+            f"               ( = -GM/(2a) )\n\n"
+            f"  ΔE/|E|     = {dE_perc:.2e} %\n"
+            f"               (qualità integrazione)"
+        )
+
+        # Adatta i limiti del grafico
+        if stato['mostra_ref']:
+            r_max = max(ar*(1+er) for ar, er, _ in PARAMETRI_RIFERIMENTO)
+            r_max = max(r_max, a*(1+e)) * 1.15
+        else:
+            r_max = a * (1 + e) * 1.18
+            r_max = max(r_max, 0.5)  # evita zoom eccessivo per a piccoli
+        ax.set_xlim(-r_max, r_max)
+        ax.set_ylim(-r_max, r_max)
+
+        fig.canvas.draw_idle()
+
+    def reset(_event):
+        """Riporta gli slider ai valori della Terra (a=1, e=0.0167).
+
+        L'eccentricità reale della Terra (0.0167) non è un multiplo
+        dello step 0.05: bypassiamo temporaneamente lo snap.
+        """
+        step_a, step_e = slider_a.valstep, slider_e.valstep
+        slider_a.valstep, slider_e.valstep = None, None
+        slider_a.set_val(1.0)
+        slider_e.set_val(0.0167)
+        slider_a.valstep, slider_e.valstep = step_a, step_e
+
+    def toggle_confronta(_event):
+        stato['mostra_ref'] = not stato['mostra_ref']
+        if stato['mostra_ref']:
+            btn_cmp.label.set_text('Nascondi')
+            for orb_r, linea in zip(orbite_ref_cache, linee_ref):
+                linea.set_data(orb_r.pos[:, 0], orb_r.pos[:, 1])
+            ax.legend(loc='upper right', fontsize=7,
+                      facecolor='#101025', labelcolor='white',
+                      framealpha=0.85)
+        else:
+            btn_cmp.label.set_text('Confronta')
+            for linea in linee_ref:
+                linea.set_data([], [])
+            leg = ax.get_legend()
+            if leg is not None:
+                leg.remove()
+        aggiorna()
+
+    slider_a.on_changed(aggiorna)
+    slider_e.on_changed(aggiorna)
+    btn_reset.on_clicked(reset)
+    btn_cmp.on_clicked(toggle_confronta)
+
+    aggiorna()
+    plt.show()
+
+
+# ---------------------------------------------------------------------------
 #  Main
 # ---------------------------------------------------------------------------
 
@@ -446,4 +642,16 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="Simulazione della terza legge di Keplero "
+                    "(F = GMm/r² ⇒ T² ∝ a³)")
+    parser.add_argument(
+        "--interattivo", action="store_true",
+        help="Modalità interattiva con slider per esplorare le orbite. "
+             "Senza questa flag esegue la simulazione completa.")
+    args = parser.parse_args()
+
+    if args.interattivo:
+        interattivo()
+    else:
+        main()
